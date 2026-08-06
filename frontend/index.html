@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Trendly order support" />
+    <title>Trendly Support</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="site-shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="Trendly support home">
+          <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span>trendly<span class="brand-dot">.</span></span>
+        </a>
+        <div class="topbar-actions">
+          <span class="availability"><span class="signal"></span><span id="service-status">Checking service</span></span>
+          <button class="quiet-button" id="new-chat" type="button">New conversation</button>
+        </div>
+      </header>
+
+      <main class="main-layout">
+        <section class="hero-panel" aria-labelledby="page-title">
+          <p class="eyebrow">ORDER HELP, MADE SIMPLE</p>
+          <h1 id="page-title">A little clarity<br />goes a long way.</h1>
+          <p class="hero-copy">Track an order, start a return, or get a straight answer about shipping. Trendly Assist keeps the process moving.</p>
+          <div class="promise-grid" aria-label="Support capabilities">
+            <article>
+              <span class="promise-icon coral">↗</span>
+              <h2>Order updates</h2>
+              <p>Get a verified read on where things stand.</p>
+            </article>
+            <article>
+              <span class="promise-icon lilac">↺</span>
+              <h2>Easy returns</h2>
+              <p>Check item-level eligibility before you act.</p>
+            </article>
+            <article>
+              <span class="promise-icon butter">✦</span>
+              <h2>Clear policy</h2>
+              <p>Answers grounded in Trendly's current policy.</p>
+            </article>
+          </div>
+          <p class="privacy-note"><span>⌁</span> We’ll verify ownership before showing order details.</p>
+        </section>
+
+        <section class="chat-card" aria-label="Trendly support chat">
+          <div class="chat-head">
+            <div class="assistant-avatar" aria-hidden="true">T</div>
+            <div>
+              <p class="chat-title">Trendly Assist</p>
+              <p class="chat-subtitle">Order &amp; returns support</p>
+            </div>
+            <span class="online-pill"><span></span> Online</span>
+          </div>
+
+          <div class="chat-scroll" id="chat-scroll" aria-live="polite" aria-label="Chat messages">
+            <div class="message assistant-message intro-message">
+              <span class="message-label">TRENDLY ASSIST</span>
+              <div class="bubble">
+                Hi there — I can help with an order, return, exchange, delivery question, or Trendly policy. What would you like to sort out?
+              </div>
+            </div>
+          </div>
+
+          <div class="suggestions" aria-label="Suggested questions">
+            <button type="button" data-prompt="Where is my order?">Track an order</button>
+            <button type="button" data-prompt="I want to return an item">Start a return</button>
+            <button type="button" data-prompt="What is your shipping policy?">Shipping policy</button>
+          </div>
+
+          <form class="composer" id="chat-form">
+            <label class="sr-only" for="message">Your message</label>
+            <textarea id="message" name="message" rows="1" maxlength="5000" placeholder="Ask about an order or return…" autocomplete="off"></textarea>
+            <button class="send-button" id="send-button" type="submit" aria-label="Send message">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 3 9.8 14.2M21 3l-7.1 18-4.1-6.8L3 10.1 21 3Z" /></svg>
+            </button>
+          </form>
+          <p class="composer-note">Don’t share card, CVV, or bank details in chat.</p>
+        </section>
+      </main>
+    </div>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

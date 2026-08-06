@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: trendly-agentic-support-assistant
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: TRENDLY_MODEL
+        value: openai/gpt-oss-120b

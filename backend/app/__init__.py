@@ -1,0 +1,1 @@
+"""Trendly support assistant application."""
