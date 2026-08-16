@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 import logging
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from threading import Lock
-from typing import Any
+from typing import Any, cast
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -50,9 +50,16 @@ app = FastAPI(title="Trendly Agentic Support Assistant", version="0.1.0")
 limiter = Limiter(key_func=lambda request: request.headers.get("X-Session-ID", request.client.host if request.client else "unknown"))
 app.state.limiter = limiter
 # slowapi's handler is typed specifically for RateLimitExceeded; FastAPI's
-# add_exception_handler stub expects a handler generic over Exception, which
-# is a known stub-level mismatch (not a real bug) between the two packages.
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)  # type: ignore[arg-type]
+# add_exception_handler stub expects a handler generic over Exception. This is
+# a known stub-level mismatch (not a real bug), and whether mypy actually
+# flags it varies by exact fastapi/starlette/slowapi/mypy version — a
+# `# type: ignore` comment would be "unused" (and thus itself an error under
+# warn_unused_ignores) in whichever environment doesn't hit the mismatch. A
+# cast sidesteps that: it satisfies the type checker unconditionally, in
+# every environment, without ever becoming a stale/unused suppression.
+app.add_exception_handler(
+    RateLimitExceeded, cast(Callable[[Request, Exception], Any], _rate_limit_exceeded_handler),
+)
 support_tools = SupportTools(ORDERS_PATH, POLICY_PATH)
 agent = TrendlyAgent(support_tools)
 # Session content itself now lives in session_store (Redis-backed, with an
