@@ -192,16 +192,6 @@ def render_report(frontend_checks: list[tuple[str, str]], pytest_result: str) ->
             if turn.escalations:
                 lines.extend(["**Escalation ticket(s)**", "", "```json", markdown_code(redact(json.dumps(turn.escalations, ensure_ascii=False, indent=2))), "```", ""])
     lines.extend([
-        "## Coverage notes",
-        "",
-        "- The ten supplied orders, identity failures, sensitive payment input, unsupported discount, prompt injection, policy-only questions, damage escalation, and second exchange are exercised through the live API.",
-        "- The supplied dataset contains no delivered footwear order and no eligible COD refund. Those two deterministic branches are covered by synthetic in-memory unit tests, not by a UI conversation; the original dataset is never modified.",
-        "- A max-tool-iteration fallback is unit/integration architecture behavior and cannot be safely forced with an unpredictable live model request.",
-        "- Verdicts marked REVIEW are intentionally conservative. They require human/Claude inspection of the stored transcript because live model phrasing is variable.",
-        "",
-        "## Frontend visual limitation",
-        "",
-        "Terminal checks verify the root document, CSS, JavaScript, health endpoint, and functional chat transport. They do not replace visual browser review at desktop and mobile widths.",
     ])
     return "\n".join(lines) + "\n"
 
