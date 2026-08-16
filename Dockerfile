@@ -15,7 +15,7 @@ RUN groupadd --system trendly \
 
 COPY backend/ backend/
 COPY frontend/ frontend/
-COPY ["assignment material/", "assignment material/"]
+COPY material/ material/
 
 RUN chown -R trendly:trendly /app
 USER trendly

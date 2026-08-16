@@ -1,7 +1,14 @@
 .env
+.env.*
+!.env.example
 .venv/
 __pycache__/
 .pytest_cache/
 *.py[cod]
 *.log
 .DS_Store
+report.md
+docker-compose.override.yml
+LIVE_EVALUATION_REPORT.md
+SOLUTION.md
+PEOMPTS.md

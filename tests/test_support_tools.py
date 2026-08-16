@@ -3,7 +3,11 @@ from __future__ import annotations
 import pytest
 
 from backend.app.config import ORDERS_PATH, POLICY_PATH
-from backend.app.guardrails import extract_identity_credentials, inspect_message, redact_payment_details
+from backend.app.guardrails import (
+    extract_identity_credentials,
+    inspect_message,
+    redact_payment_details,
+)
 from backend.app.state import SessionState
 from backend.app.tools import SupportTools
 
@@ -66,6 +70,24 @@ def test_delay_is_date_based_not_status_based(support: SupportTools) -> None:
         assert delayed and late_days == days
 
 
+def test_delivered_on_time_order_is_never_flagged_delayed(support: SupportTools) -> None:
+    # TR-4530 was delivered a day before its expected date; delivery alone must not
+    # make an on-time order look delayed.
+    assert support.is_delayed(support.orders["TR-4530"]) == (False, 0)
+
+
+def test_delivered_order_can_still_be_flagged_delayed(support: SupportTools) -> None:
+    # A delivered order that arrived well past its expected date is still delayed
+    # under policy §1.5, which is not conditioned on the order still being in transit.
+    support.orders["TEST-LATE-DELIVERED"] = {
+        "order_id": "TEST-LATE-DELIVERED", "customer_id": "C-100", "status": "delivered",
+        "delivered_at": "2026-08-01T11:00:00Z", "expected_delivery": "2026-07-20",
+        "items": [{"sku": "TEST-LATE-1", "name": "Test Item", "category": "apparel", "final_sale": False}],
+    }
+    delayed, late_days = support.is_delayed(support.orders["TEST-LATE-DELIVERED"])
+    assert delayed and late_days > 3
+
+
 def test_delay_credit_is_verified_and_once_per_session(support: SupportTools) -> None:
     state = verified(support, "TR-4521")
     first = support.issue_delay_store_credit(state, "TR-4521")
@@ -79,6 +101,38 @@ def test_footwear_disclosure_and_size_only_exchange(support: SupportTools) -> No
     assert support.initiate_return_or_exchange(state, "TR-4530", "TR-KRT-033", "exchange", "size XL is needed")["ok"]
     second = support.initiate_return_or_exchange(state, "TR-4530", "TR-KRT-033", "exchange", "size L is needed")
     assert second["requires_escalation"]
+
+
+def test_size_exchange_accepts_bare_numeric_size_without_the_word_size(support: SupportTools) -> None:
+    # Numeric sizing (jeans, footwear) is real in the dataset; a customer does not
+    # have to say the literal word "size" for this to be a legitimate size exchange.
+    support.orders["TEST-NUM-SIZE"] = {
+        "order_id": "TEST-NUM-SIZE", "customer_id": "C-100", "status": "delivered",
+        "delivered_at": "2026-07-30T11:00:00Z", "expected_delivery": "2026-07-30",
+        "payment_method": "credit_card",
+        "items": [{"sku": "TEST-NUM-SIZE-1", "name": "Jeans", "category": "apparel", "final_sale": False}],
+    }
+    state = verified(support, "TEST-NUM-SIZE")
+    result = support.initiate_return_or_exchange(
+        state, "TEST-NUM-SIZE", "TEST-NUM-SIZE-1", "exchange", "need it in 30 instead, current one does not fit",
+    )
+    assert result["ok"]
+
+
+def test_size_exchange_rejects_colour_word_without_the_word_colour(support: SupportTools) -> None:
+    state = verified(support, "TR-4530")
+    result = support.initiate_return_or_exchange(state, "TR-4530", "TR-KRT-033", "exchange", "I want it in blue instead")
+    assert not result["ok"]
+
+
+def test_size_exchange_reason_mentioning_delivered_is_not_false_flagged_as_colour(support: SupportTools) -> None:
+    # "delivered" contains "red" as a substring; the denylist must match whole words
+    # only, or this legitimate size-exchange reason would be wrongly rejected.
+    state = verified(support, "TR-4530")
+    result = support.initiate_return_or_exchange(
+        state, "TR-4530", "TR-KRT-033", "exchange", "it was delivered late, please exchange for a smaller size",
+    )
+    assert result["ok"]
 
 
 def test_eligible_footwear_includes_box_notice(support: SupportTools) -> None:

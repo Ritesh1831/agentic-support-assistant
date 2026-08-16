@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Trendly Admin</title>
+    <style>
+      body { margin: 0; padding: 24px; background: #f7f5f2; color: #1d1c24; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+      h1 { font-size: 20px; margin: 0 0 4px; }
+      h2 { font-size: 14px; margin: 28px 0 10px; color: #55505d; }
+      .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 10px 0; }
+      input[type="password"], input[type="text"] { padding: 8px 10px; border: 1px solid #d7d1cc; border-radius: 6px; font: inherit; min-width: 220px; }
+      button { padding: 8px 14px; border: 1px solid #1d1c24; border-radius: 6px; background: #1d1c24; color: white; font: inherit; cursor: pointer; }
+      button:hover { opacity: 0.85; }
+      .pill { display: inline-block; padding: 3px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+      .pill.ok { background: #dff4e9; color: #257a4c; }
+      .pill.bad { background: #fbe0dc; color: #b23a24; }
+      .card { background: white; border: 1px solid #e8e5e2; border-radius: 8px; padding: 12px 14px; margin: 0 0 10px; font-size: 13px; }
+      .card strong { display: inline-block; min-width: 90px; color: #55505d; }
+      pre { background: white; border: 1px solid #e8e5e2; border-radius: 8px; padding: 12px 14px; overflow-x: auto; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+      .muted { color: #77727d; font-size: 12px; }
+      #status-line { margin-top: 10px; }
+    </style>
+  </head>
+  <body>
+    <h1>Trendly — Admin</h1>
+    <p class="muted">Read-only operational view. Nothing here is sent anywhere except this browser's requests to this server.</p>
+
+    <div class="row">
+      <input type="password" id="admin-key" placeholder="Admin key (X-Admin-Key)" autocomplete="off" />
+      <button id="connect">Connect</button>
+      <span id="status-line" class="muted">Not connected.</span>
+    </div>
+
+    <h2>Service health</h2>
+    <div id="health-out" class="muted">—</div>
+
+    <h2>Escalations <span id="escalation-total" class="muted"></span></h2>
+    <div id="escalations-out" class="muted">—</div>
+
+    <h2>Session transcript lookup</h2>
+    <div class="row">
+      <input type="text" id="session-id-input" placeholder="session_id" autocomplete="off" />
+      <button id="lookup-transcript">Fetch transcript</button>
+    </div>
+    <pre id="transcript-out" class="muted">—</pre>
+
+    <script>
+      let adminKey = "";
+      let refreshTimer = null;
+
+      function escapeHtml(value) {
+        return String(value).replace(/[&<>'"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[c]);
+      }
+
+      async function adminFetch(path) {
+        const response = await fetch(path, { headers: { "X-Admin-Key": adminKey } });
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(body.detail || `HTTP ${response.status}`);
+        return body;
+      }
+
+      function renderHealth(health) {
+        const store = health.session_store || {};
+        const storeBadge = store.backend === "redis" && store.connected
+          ? '<span class="pill ok">redis (connected)</span>'
+          : store.backend === "redis"
+            ? '<span class="pill bad">redis (disconnected)</span>'
+            : '<span class="pill ok">memory</span>';
+        document.querySelector("#health-out").innerHTML =
+          `<span class="pill ${health.status === "ok" ? "ok" : "bad"}">status: ${escapeHtml(health.status)}</span> &nbsp; session store: ${storeBadge}`;
+      }
+
+      function renderEscalations(data) {
+        document.querySelector("#escalation-total").textContent = `(${data.total}, source: ${data.source})`;
+        const container = document.querySelector("#escalations-out");
+        if (!data.escalations.length) {
+          container.innerHTML = '<span class="muted">No escalations.</span>';
+          return;
+        }
+        container.innerHTML = data.escalations
+          .map((ticket) => `
+            <div class="card">
+              <div><strong>Reason</strong> ${escapeHtml(ticket.reason || "—")}</div>
+              <div><strong>Order</strong> ${escapeHtml(ticket.order_id || "—")}</div>
+              <div><strong>Priority</strong> ${escapeHtml(ticket.priority || "—")}</div>
+              <div><strong>Created</strong> ${escapeHtml(ticket.created_at || "—")}</div>
+              <div><strong>Summary</strong> ${escapeHtml(ticket.summary || "—")}</div>
+            </div>
+          `)
+          .join("");
+      }
+
+      async function refresh() {
+        try {
+          const [health, escalations] = await Promise.all([adminFetch("/health"), adminFetch("/admin/escalations")]);
+          renderHealth(health);
+          renderEscalations(escalations);
+          document.querySelector("#status-line").textContent = `Connected. Last refresh: ${new Date().toLocaleTimeString()}`;
+        } catch (error) {
+          document.querySelector("#status-line").textContent = `Error: ${error.message}`;
+        }
+      }
+
+      document.querySelector("#connect").addEventListener("click", () => {
+        adminKey = document.querySelector("#admin-key").value.trim();
+        if (!adminKey) return;
+        if (refreshTimer) clearInterval(refreshTimer);
+        refresh();
+        refreshTimer = setInterval(refresh, 30000);
+      });
+
+      document.querySelector("#lookup-transcript").addEventListener("click", async () => {
+        const sessionId = document.querySelector("#session-id-input").value.trim();
+        const out = document.querySelector("#transcript-out");
+        if (!sessionId) return;
+        if (!adminKey) {
+          out.textContent = "Connect with an admin key first.";
+          return;
+        }
+        try {
+          const data = await adminFetch(`/admin/transcript/${encodeURIComponent(sessionId)}`);
+          out.textContent = JSON.stringify(data, null, 2);
+        } catch (error) {
+          out.textContent = `Error: ${error.message}`;
+        }
+      });
+    </script>
+  </body>
+</html>

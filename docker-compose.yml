@@ -1,0 +1,41 @@
+version: "3.9"
+
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # Overrides whatever REDIS_URL is set to in .env: inside the compose
+      # network the Redis service is reachable at the service name "redis",
+      # not localhost.
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      # Bind-mount source for local hot reload; `uvicorn --reload` isn't
+      # enabled by default in the Dockerfile CMD, but these mounts let you
+      # add --reload locally without rebuilding the image.
+      - ./backend:/app/backend
+      - ./frontend:/app/frontend
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+
+volumes:
+  redis_data:

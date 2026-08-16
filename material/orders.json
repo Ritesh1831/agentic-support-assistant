@@ -1,5 +1,5 @@
 {
-  "_note": "Fixed dataset for the Trendly FDE assignment. Load this file as-is. Do NOT edit, rename, or add orders — the evaluation harness tests against these exact records.",
+  "_note": "It is an example order data for a fashion e-commerce platform. Each order has a status, timestamps, shipping info, and items. Some orders have notes for designers or customer service agents regarding return eligibility.",
   "customers": [
     { "customer_id": "C-100", "name": "Ananya Rao", "email": "ananya.rao@example.com", "phone": "+91-98765-10001" },
     { "customer_id": "C-101", "name": "Marcus Bell", "email": "marcus.bell@example.com", "phone": "+1-415-555-0102" },

@@ -1,17 +1,34 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, time, timezone
+import logging
+import re
+from collections.abc import Callable
+from datetime import UTC, date, datetime, time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from .config import business_today
+from . import config
 from .policy import PolicySearch
 from .state import SessionState
+
+logger = logging.getLogger(__name__)
 
 NON_RETURNABLE_CATEGORIES = {
     "innerwear", "socks", "jewellery", "beauty", "fragrance", "face_masks", "gift_cards",
 }
+
+# Policy §4.1 backstop: exchanges are size-only, never colour/style. Matched on whole
+# words via regex rather than substring containment, because "red" is a substring of
+# ordinary words like "delivered" or "preferred" and a naive `in` check would falsely
+# block plain size-exchange reasons that merely happen to contain those words.
+COLOUR_STYLE_DENYLIST = re.compile(
+    r"\b(colour|color|style|design|pattern|print|printed|shade|"
+    r"red|blue|green|black|white|pink|yellow|purple|orange|grey|gray|"
+    r"navy|maroon|beige|brown|cream|gold|silver|teal|olive|mustard|"
+    r"peach|lavender|coral|burgundy|khaki|turquoise|charcoal|ivory)\b",
+    re.IGNORECASE,
+)
 
 
 def _parse_date(value: str | None) -> date | None:
@@ -24,18 +41,20 @@ def _parse_datetime(value: str | None) -> datetime | None:
     if not value:
         return None
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
-def business_days_after(start: date, end: date) -> int:
-    """Weekdays strictly after start through end; public holidays are unavailable in the brief."""
+def business_days_after(start: date, end: date, holidays: frozenset[date] = config.HOLIDAYS) -> int:
+    """Weekdays strictly after start through end, excluding `holidays` (empty by
+    default — no holiday calendar was supplied in the original brief; set
+    TRENDLY_HOLIDAYS to populate config.HOLIDAYS once Trendly ops has one)."""
     if end <= start:
         return 0
     count = 0
     cursor = start
     while cursor < end:
         cursor = date.fromordinal(cursor.toordinal() + 1)
-        if cursor.weekday() < 5:
+        if cursor.weekday() < 5 and cursor not in holidays:
             count += 1
     return count
 
@@ -46,6 +65,22 @@ class SupportTools:
         self.orders = {order["order_id"]: order for order in data["orders"]}
         self.customers = {customer["customer_id"]: customer for customer in data["customers"]}
         self.policy = PolicySearch(policy_path)
+        # Optional cross-session collaborators (session_store.check_exchange /
+        # .record_exchange / .publish_escalation), assigned onto the instance
+        # once from main.py after construction, rather than threaded through as
+        # extra parameters on initiate_return_or_exchange/escalate_to_human.
+        # dispatch() calls every tool as `handler(state, **arguments)`, where
+        # `arguments` comes straight from the model's tool-call JSON — routing
+        # these callables through that path would mean either special-casing
+        # dispatch() per tool name to inject them, or exposing them on the TOOLS
+        # schema where the model could try to "supply" them itself. Setting them
+        # once here needs no change to dispatch() or the TOOLS schema at all,
+        # which is the smallest change that gets the same result. None means "no
+        # cross-session backing store available" — the existing session-scoped
+        # behavior (exchange cap, in-memory-only escalations) still applies.
+        self._check_cross_session_exchange: Callable[[str, str, str], bool] | None = None
+        self._record_cross_session_exchange: Callable[[str, str, str], None] | None = None
+        self._publish_escalation: Callable[[dict[str, Any]], None] | None = None
 
     def _order_for_verified_session(self, state: SessionState, order_id: str) -> dict[str, Any] | None:
         if order_id not in state.verified_order_ids:
@@ -76,17 +111,22 @@ class SupportTools:
             return "48-hour reporting window could not be evaluated because this order has no delivery timestamp."
         # The assignment only provides a date override, so its start-of-day UTC is
         # used for reproducible evaluation. In production this should use a real clock.
-        reference = datetime.combine(business_today(), time.min, tzinfo=timezone.utc)
+        reference = datetime.combine(config.business_today(), time.min, tzinfo=UTC)
         elapsed_hours = max(0, int((reference - delivered_at).total_seconds() // 3600))
         status = "within" if elapsed_hours <= 48 else "outside"
         return f"Reported {elapsed_hours} hours after delivery: {status} the 48-hour policy §6.1 window."
 
     def is_delayed(self, order: dict[str, Any]) -> tuple[bool, int]:
-        # Policy §1.5: more than three business days after expected delivery, not status-based.
+        # Policy §1.5: more than three business days after expected delivery, not
+        # status-based. A late-arriving order stays delayed even after delivery — use
+        # the delivery date as the end point once delivered, business_today() while
+        # still in transit, rather than only ever checking in-transit orders.
         expected = _parse_date(order.get("expected_delivery"))
-        if order.get("delivered_at") or not expected:
+        if not expected:
             return False, 0
-        late_days = business_days_after(expected, business_today())
+        delivered = _parse_date(order.get("delivered_at"))
+        end = delivered if delivered else config.business_today()
+        late_days = business_days_after(expected, end, config.HOLIDAYS)
         return late_days > 3, late_days
 
     def _delay_credit_context(self, state: SessionState, order: dict[str, Any]) -> dict[str, Any] | None:
@@ -104,7 +144,7 @@ class SupportTools:
         selected = [item for item in order["items"] if sku is None or item["sku"] == sku]
         if sku and not selected:
             return {"ok": False, "error": "That SKU is not part of this verified order."}
-        today = business_today()
+        today = config.business_today()
         items: list[dict[str, Any]] = []
         for item in selected:
             result: dict[str, Any] = {
@@ -217,16 +257,32 @@ class SupportTools:
         if mode == "exchange":
             if not item["exchange_eligible"]:
                 return {"ok": False, "error": "Authoritative eligibility result does not allow an exchange.", "eligibility": item}
-            if not any(word in reason.lower() for word in ("size", "small", "medium", "large", "xs", "xl", "xxl")):
+            if COLOUR_STYLE_DENYLIST.search(reason):
                 return {"ok": False, "error": "Trendly offers size exchanges only, not colour or style exchanges (policy §4.1)."}
             exchanges = state.exchanges_this_session.setdefault(order_id, {})
-            if exchanges.get(sku, 0) >= 1:
+            # state.exchanges_this_session only ever knows about *this* chat
+            # session; a customer who opens a fresh tab bypasses the §4.4 one-
+            # exchange-per-item cap entirely otherwise. self._check_cross_session_
+            # exchange (bound to session_store.check_exchange from main.py) closes
+            # that gap by checking a customer-scoped record that outlives any one
+            # session, without requiring a verified customer_id it can't run at all.
+            used_cross_session = (
+                exchanges.get(sku, 0) >= 1
+                or (
+                    self._check_cross_session_exchange is not None
+                    and state.verified_customer_id is not None
+                    and self._check_cross_session_exchange(state.verified_customer_id, order_id, sku)
+                )
+            )
+            if used_cross_session:
                 ticket = self._create_escalation_once(
                     state, reason="second_exchange", order_id=order_id, priority="normal",
                     summary=f"Second size exchange requested for verified order {order_id}, SKU {sku}. Policy §4.4 requires human approval.",
                 )
                 return {"ok": False, "requires_escalation": True, "error": "A second exchange for this item requires human approval (policy §4.4).", "escalation": ticket}
             exchanges[sku] = exchanges.get(sku, 0) + 1
+            if self._record_cross_session_exchange is not None and state.verified_customer_id is not None:
+                self._record_cross_session_exchange(state.verified_customer_id, order_id, sku)
         return {
             "ok": True, "action": mode, "order_id": order_id, "sku": sku, "reason": reason,
             "message": f"{mode.title()} request initiated for {sku}.",
@@ -251,10 +307,20 @@ class SupportTools:
         existing = self._existing_escalation(state, reason, order_id)
         if existing:
             return {"ok": True, "escalation": existing, "already_escalated": True}
-        ticket = {"ticket_id": f"ESC-{len(state.escalations) + 1:04d}", "reason": reason, "summary": summary, "priority": priority, "order_id": order_id}
+        ticket = {
+            "ticket_id": f"ESC-{len(state.escalations) + 1:04d}", "reason": reason, "summary": summary,
+            "priority": priority, "order_id": order_id, "created_at": datetime.now(UTC).isoformat(),
+        }
         if any(term in reason.lower() for term in ("damaged", "wrong", "defective")):
             ticket["damage_window_context"] = self._damage_window_context(state, order_id)
         state.escalations.append(ticket)
+        # This is the single place a *new* ticket is ever appended — reached both
+        # by the internal deterministic escalation paths (via _create_escalation_once)
+        # and by the model calling escalate_to_human directly as a tool — so hooking
+        # the outbox publish here, rather than only inside _create_escalation_once,
+        # covers every escalation the app can raise with one call site.
+        if self._publish_escalation is not None:
+            self._publish_escalation(ticket)
         return {"ok": True, "escalation": ticket}
 
     def dispatch(self, state: SessionState, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -273,4 +339,16 @@ class SupportTools:
         try:
             return handler(state, **arguments)
         except (TypeError, ValueError) as error:
+            # The model supplied arguments that don't match the tool's signature
+            # or fail a value check — this is a bad call, not an internal bug.
             return {"ok": False, "error": f"Invalid tool arguments: {error}"}
+        except Exception as error:
+            # Anything else is an unexpected internal failure inside the tool
+            # itself; without this, it would propagate uncaught out of the
+            # agent loop and surface as an unhandled 500 instead of letting the
+            # model recover (or the outer fallback reply take over) gracefully.
+            logger.error(
+                "Tool %s raised %s: %s", name, type(error).__name__, error,
+                exc_info=True, extra={"tool_name": name},
+            )
+            return {"ok": False, "error": f"Tool {name} encountered an internal error. Please try again."}

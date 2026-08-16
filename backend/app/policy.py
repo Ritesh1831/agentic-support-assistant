@@ -6,7 +6,6 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-
 TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 

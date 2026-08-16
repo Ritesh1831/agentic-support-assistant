@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-
 HUMAN_REQUEST_RE = re.compile(r"\b(?:human|live agent|real person|representative|customer service agent)\b", re.I)
 AUTHORITY_RE = re.compile(r"\b(?:discount|coupon|promo(?:tional)? code|goodwill|waive|waiver)\b", re.I)
 INJECTION_RE = re.compile(r"\b(?:ignore (?:all |previous |your )?instructions|reveal (?:your )?(?:system )?prompt|roleplay (?:as|override)|developer message)\b", re.I)

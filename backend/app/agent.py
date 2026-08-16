@@ -5,6 +5,7 @@ import logging
 import os
 import random
 import time
+from collections.abc import Iterator
 from typing import Any
 
 from openai import (
@@ -73,23 +74,27 @@ class TrendlyAgent:
         short retry would usually go through fine. Non-transient errors (bad
         request, auth, etc.) are not caught here and propagate immediately to the
         existing fallback in respond().
+
+        Attempts are 0-indexed. The call is always tried first with no delay;
+        a delay only ever happens *after* a failed attempt and *before* the
+        next one. On the final attempt a transient failure is re-raised
+        immediately instead of sleeping first, since there is no further
+        attempt left to wait for.
         """
-        last_error: Exception | None = None
         for attempt in range(MAX_LLM_RETRIES + 1):
             try:
                 return client.chat.completions.create(**kwargs)
             except (RateLimitError, APIConnectionError, APITimeoutError, InternalServerError) as error:
-                last_error = error
                 if attempt == MAX_LLM_RETRIES:
-                    break
+                    raise
                 delay = LLM_RETRY_BASE_DELAY_SECONDS * (2 ** attempt) + random.uniform(0, 0.25)
                 logger.warning(
                     "Groq completion attempt %s/%s failed (%s); retrying in %.2fs",
                     attempt + 1, MAX_LLM_RETRIES + 1, type(error).__name__, delay,
+                    extra={"attempt": attempt},
                 )
                 time.sleep(delay)
-        assert last_error is not None
-        raise last_error
+        raise RuntimeError("unreachable: retry loop exited without returning or raising")
 
     @staticmethod
     def _forced_note(state: SessionState, signals: GuardrailSignals) -> str | None:
@@ -194,3 +199,147 @@ class TrendlyAgent:
             reply = "The support assistant is temporarily unavailable. Please try again shortly, or request a human agent."
         state.messages.append({"role": "assistant", "content": reply})
         return reply
+
+    def respond_stream(
+        self, state: SessionState, message: str, llm_message: str, signals: GuardrailSignals,
+        identity_precheck_note: str | None = None, delay_precheck: dict[str, Any] | None = None,
+    ) -> Iterator[str]:
+        """Generator twin of respond(): yields the final reply incrementally
+        instead of returning it as one string, for a caller to relay over
+        Server-Sent Events. Every non-streaming decision here — guardrails,
+        forced escalation, tool dispatch, the grounding overrides — is
+        identical to respond(); only delivery of the final, user-visible
+        completion differs.
+
+        Tool-calling turns are never streamed to the customer: a model
+        deciding *which* tool to call produces no text a customer should see,
+        so those completions still use stream=True (so a slow model doesn't
+        block interim progress from ever starting), but their deltas are only
+        accumulated into a tool call, never yielded. Only the turn that ends
+        up making no further tool calls is actually streamed token-by-token.
+        This assumes a single completion is either all tool-calls or all
+        content, never a mix mid-stream — true of observed Groq/OpenAI
+        function-calling behavior, but not something the API contractually
+        guarantees, so a turn that somehow switched modes mid-stream could
+        yield a few tokens that are followed by tool dispatch instead of a
+        finished sentence.
+        """
+        state.turn_count += 1
+        escalations_before = len(state.escalations)
+        state.raw_transcript.append({"role": "user", "content": message})
+        if signals.payment_details:
+            state.messages.append({"role": "user", "content": llm_message})
+            self._force_escalation(state, "payment_details_shared")
+            reply = "For your security, please do not send bank, card, or CVV details here. A human agent can collect any required COD bank details through a secure link."
+            state.messages.append({"role": "assistant", "content": reply})
+            yield reply
+            return
+
+        state.messages.append({"role": "user", "content": llm_message})
+        forced = self._forced_note(state, signals)
+        messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        messages.extend(state.messages)
+        if identity_precheck_note:
+            messages.append({"role": "system", "content": identity_precheck_note})
+        if forced:
+            messages.append({"role": "system", "content": forced})
+        action_completion_message: str | None = None
+        required_delay_offer: dict[str, Any] | None = delay_precheck
+        try:
+            client = self._client()
+            for _ in range(MAX_TOOL_ITERATIONS):
+                content_chunks: list[str] = []
+                tool_calls_acc: dict[int, dict[str, str]] = {}
+                saw_tool_calls = False
+                # Already known before this call: an earlier tool call this turn
+                # may have completed an action, whose message overrides whatever
+                # this completion generates (mirrors the `action_completion_message`
+                # branch in respond()) — so there is no point streaming tokens to
+                # the customer that are about to be discarded.
+                suppress_stream = action_completion_message is not None
+                stream = self._completion_with_retry(
+                    client, model=MODEL, messages=messages, tools=TOOLS, tool_choice="auto",
+                    temperature=0.2, stream=True,
+                )
+                for chunk in stream:
+                    delta = chunk.choices[0].delta
+                    if delta.tool_calls:
+                        saw_tool_calls = True
+                        for tc in delta.tool_calls:
+                            entry = tool_calls_acc.setdefault(tc.index, {"id": "", "name": "", "arguments": ""})
+                            if tc.id:
+                                entry["id"] = tc.id
+                            if tc.function and tc.function.name:
+                                entry["name"] = tc.function.name
+                            if tc.function and tc.function.arguments:
+                                entry["arguments"] += tc.function.arguments
+                    elif delta.content:
+                        content_chunks.append(delta.content)
+                        if not suppress_stream and not saw_tool_calls:
+                            yield delta.content
+
+                if saw_tool_calls:
+                    ordered_calls = [tool_calls_acc[i] for i in sorted(tool_calls_acc)]
+                    assistant_message: dict[str, Any] = {
+                        "role": "assistant", "content": "",
+                        "tool_calls": [
+                            {"id": call["id"], "type": "function", "function": {"name": call["name"], "arguments": call["arguments"]}}
+                            for call in ordered_calls
+                        ],
+                    }
+                    messages.append(assistant_message)
+                    state.messages.append(assistant_message)
+                    for call in assistant_message["tool_calls"]:
+                        try:
+                            arguments = json.loads(call["function"]["arguments"] or "{}")
+                        except json.JSONDecodeError:
+                            arguments = {}
+                        result = self.support_tools.dispatch(state, call["function"]["name"], arguments)
+                        if call["function"]["name"] == "lookup_order" and result.get("delay_credit_available"):
+                            required_delay_offer = result["delay_credit_available"]
+                        if call["function"]["name"] in {"initiate_return_or_exchange", "issue_delay_store_credit"} and result.get("ok"):
+                            action_completion_message = result.get("message")
+                        tool_message = {"role": "tool", "tool_call_id": call["id"], "content": json.dumps(result, ensure_ascii=False)}
+                        messages.append(tool_message)
+                        state.messages.append(tool_message)
+                    continue
+
+                # No tool calls this iteration: it produced the final reply.
+                if forced and len(state.escalations) == escalations_before:
+                    self._force_escalation(state, "forced_handoff")
+                full_content = "".join(content_chunks)
+                if action_completion_message:
+                    # Nothing was streamed above for this turn (suppress_stream
+                    # was true), so the deterministic result is sent as one chunk.
+                    reply = action_completion_message
+                    yield reply
+                else:
+                    reply = full_content or "I’m sorry, I couldn’t complete that request. I’ll connect you with a human agent."
+                    if not content_chunks:
+                        # The model returned no content at all; there is nothing
+                        # left over from the loop above to have already streamed.
+                        yield reply
+                    if required_delay_offer and "250" not in reply and "₹250" not in reply:
+                        order_label = required_delay_offer.get("order_id") or state.active_order_id or "this order"
+                        addition = (
+                            f"\n\nOrder {order_label} is also delayed by "
+                            f"{required_delay_offer['business_days_late']} business days. You can request "
+                            "the policy-defined ₹250 store credit; would you like me to issue it?"
+                        )
+                        reply = f"{reply.rstrip()}{addition}"
+                        yield addition
+                safe_message = {"role": "assistant", "content": reply}
+                messages.append(safe_message)
+                state.messages.append(safe_message)
+                return
+            self._force_escalation(state, "max_tool_iterations")
+            reply = "I’m sorry, I couldn’t safely complete this in chat. I’ve handed it to a human support agent."
+            state.messages.append({"role": "assistant", "content": reply})
+            yield reply
+        except (APIError, OpenAIError) as error:
+            logger.error("Groq streaming request failed (%s): %s", type(error).__name__, error)
+            if forced:
+                self._force_escalation(state, "llm_unavailable_during_forced_handoff")
+            reply = "The support assistant is temporarily unavailable. Please try again shortly, or request a human agent."
+            state.messages.append({"role": "assistant", "content": reply})
+            yield reply

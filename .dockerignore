@@ -1,0 +1,17 @@
+.env
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.log
+.DS_Store
+tests/
+scripts/
+LIVE_EVALUATION_REPORT.md
+.git/
+.github/
+*.md
+!README.md
+.dockerignore

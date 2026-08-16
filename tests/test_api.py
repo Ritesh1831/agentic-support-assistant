@@ -1,16 +1,14 @@
-from fastapi.testclient import TestClient
-
 import json
 from types import SimpleNamespace
 
 import httpx
-import pytest
+from fastapi.testclient import TestClient
 from openai import InternalServerError, RateLimitError
 
 from backend.app.agent import TrendlyAgent
 from backend.app.config import ORDERS_PATH, POLICY_PATH
 from backend.app.guardrails import inspect_message
-from backend.app.main import app, sessions
+from backend.app.main import _get_session, app, session_store
 from backend.app.state import SessionState
 from backend.app.tools import SupportTools
 
@@ -22,7 +20,12 @@ def _fake_response(status_code: int) -> httpx.Response:
 
 def test_health_endpoint() -> None:
     client = TestClient(app)
-    assert client.get("/health").json() == {"status": "ok"}
+    body = client.get("/health").json()
+    assert body["status"] == "ok"
+    # session_store.health() shape (Section 4C) — backend is "redis" or "memory"
+    # depending on this environment's REDIS_URL, so only the key's presence is
+    # asserted here, not a specific backend.
+    assert "session_store" in body and "backend" in body["session_store"]
 
 
 def test_frontend_is_served_from_root() -> None:
@@ -34,12 +37,11 @@ def test_frontend_is_served_from_root() -> None:
 
 
 def test_sensitive_payment_input_never_reaches_llm() -> None:
-    sessions.clear()
     client = TestClient(app)
     response = client.post("/chat", json={"session_id": "sensitive-test", "message": "My card is 4111 1111 1111 1111; CVV 123"})
     assert response.status_code == 200
     assert "do not send bank, card, or CVV details" in response.json()["reply"]
-    messages = sessions["sensitive-test"].messages
+    messages = session_store.get("sensitive-test").messages
     assert all("4111" not in str(entry) and "CVV 123" not in str(entry) for entry in messages)
 
 
@@ -120,3 +122,67 @@ def test_retries_exhausted_falls_back_to_temporarily_unavailable(monkeypatch) ->
     monkeypatch.setattr(agent, "_client", lambda: SimpleNamespace(chat=SimpleNamespace(completions=AlwaysDownCompletions())))
     reply = agent.respond(state, "hello", "hello", inspect_message("hello"))
     assert "temporarily unavailable" in reply
+
+
+def test_clear_session_returns_ok() -> None:
+    # Registers the session's lock the same way a real /chat turn would,
+    # without needing a live LLM call just to create it.
+    _get_session("clear-me")
+    client = TestClient(app)
+    response = client.delete("/chat/clear-me")
+    assert response.status_code == 200
+    assert response.json() == {"cleared": True, "session_id": "clear-me"}
+
+
+def test_clear_nonexistent_session() -> None:
+    client = TestClient(app)
+    response = client.delete("/chat/never-existed-session-id")
+    assert response.status_code == 404
+
+
+def test_global_exception_handler_returns_generic_500(monkeypatch) -> None:
+    def _boom(_message):
+        raise RuntimeError("synthetic failure for the global handler test")
+
+    # inspect_message is the first thing /chat calls inside the session lock,
+    # so this reliably reaches the handler without depending on the LLM.
+    monkeypatch.setattr("backend.app.main.inspect_message", _boom)
+    # A handler registered for the bare Exception type runs via Starlette's
+    # ServerErrorMiddleware, which always re-raises after building its
+    # response (so a real deployment still logs/serves the 500 correctly,
+    # but TestClient's default raise_server_exceptions=True would otherwise
+    # re-raise the synthetic error into this test instead of letting us
+    # assert on the response it produced).
+    client = TestClient(app, raise_server_exceptions=False)
+    response = client.post("/chat", json={"session_id": "boom-test", "message": "hello"})
+    assert response.status_code == 500
+    assert response.json() == {
+        "reply": "The support assistant is temporarily unavailable. Please try again shortly.",
+        "session_id": "",
+        "escalations": [],
+    }
+
+
+def test_admin_transcript_requires_admin_key(monkeypatch) -> None:
+    monkeypatch.setenv("ADMIN_KEY", "test-admin-key")
+    client = TestClient(app)
+    assert client.get("/admin/transcript/some-session").status_code == 403
+
+    response = client.get("/admin/transcript/some-session", headers={"X-Admin-Key": "test-admin-key"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["session_id"] == "some-session"
+    assert set(body.keys()) == {"session_id", "transcript", "turn_count", "escalations"}
+
+
+def test_admin_escalations_requires_admin_key_and_returns_shape(monkeypatch) -> None:
+    monkeypatch.setenv("ADMIN_KEY", "test-admin-key")
+    client = TestClient(app)
+    assert client.get("/admin/escalations").status_code == 403
+
+    response = client.get("/admin/escalations", headers={"X-Admin-Key": "test-admin-key"})
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body.keys()) == {"escalations", "total", "source"}
+    assert body["total"] == len(body["escalations"])
+    assert body["source"] in {"redis", "memory"}
