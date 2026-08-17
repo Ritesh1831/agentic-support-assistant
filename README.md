@@ -3,6 +3,10 @@
 Support agent for Trendly (fashion D2C brand). It answers order status, handles returns and size
 exchanges, answers shipping/policy questions, and hands off to a human when it should.
 
+[Deployment Link](https://trendly-agentic-support-assistant-aho3.onrender.com/)
+
+<img width="1896" height="969" alt="image" src="https://github.com/user-attachments/assets/5b9c032e-abbd-4f2c-b5d5-2856ab052692" />
+
 ## Base URL / start command
 
 Local: `http://127.0.0.1:8000/` (chat UI at `/`, API docs at `/docs`, health check at `/health`)
